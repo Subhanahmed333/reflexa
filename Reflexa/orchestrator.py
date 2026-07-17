@@ -151,6 +151,8 @@ class Orchestrator:
                     'patch_path': str(publication.patch_path) if publication.patch_path else None,
                     'summary_path': str(publication.summary_path) if publication.summary_path else None,
                     'pull_request_url': publication.pull_request_url,
+                    'patch_text': patch_text,
+                    'summary': last_summary,
                 },
             )
             self._emit(
@@ -159,7 +161,7 @@ class Orchestrator:
                 config.run_id,
                 'run_finished',
                 'Reflexa run finished.',
-                {'status': status.value, 'attempts': attempts},
+                {'status': status.value, 'attempts': attempts, 'summary': last_summary},
             )
             return RunResult(
                 run_id=config.run_id,
@@ -244,6 +246,7 @@ class Orchestrator:
                 if original != updated:
                     edits.append(PatchEdit(path=rel_path, content=updated))
         return edits
+
 
 
 

@@ -147,5 +147,7 @@ class E2BSandboxRunner:
         if callable(kill):
             try:
                 kill()
-            except Exception:
+            except Exception as exc:
+                print(f'Sandbox shutdown failed: {exc}')
                 pass
+

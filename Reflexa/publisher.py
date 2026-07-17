@@ -58,7 +58,8 @@ def _discover_github_repository(cwd: Path) -> str | None:
             return value
     try:
         remote_url = _run_git(['remote', 'get-url', 'origin'], cwd=cwd)
-    except Exception:
+    except Exception as exc:
+        print(f'GitHub repository discovery failed: {exc}')
         return None
     match = re.search(r'github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)(?:\.git)?$', remote_url)
     if not match:
@@ -160,3 +161,5 @@ def publish_output(run_id: str, title: str, summary: str, patch_text: str, artif
             print(f'GitHub PR publish failed: {exc}')
 
     return LocalArtifactPublisher(output_dir=artifact_dir or Path('.reflexa_artifacts')).publish(run_id, title, summary, patch_text)
+
+
