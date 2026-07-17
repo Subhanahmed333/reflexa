@@ -1,0 +1,19 @@
+--- E:\Reflexa\tests\fixtures\demo_repo\app\math_utils.py
++++ C:\Users\Subha\AppData\Local\Temp\reflexa-work-x5y_mhh0\workspace\app\math_utils.py
+@@ -2,5 +2,15 @@
+ 
+ 
+ def inclusive_sum(limit: int) -> int:
+-    return sum(range(limit))
++    """Return the sum of all integers from 1 up to and including *limit*.
+ 
++    Args:
++        limit: The upper bound of the inclusive range. Must be non‑negative.
++
++    Returns:
++        The arithmetic sum 1 + 2 + ... + limit. For limit == 0 the result is 0.
++    """
++    if limit <= 0:
++        return 0
++    # Use the arithmetic series formula for efficiency.
++    return limit * (limit + 1) // 2

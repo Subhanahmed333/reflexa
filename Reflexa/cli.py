@@ -8,8 +8,8 @@ from pathlib import Path
 from .dashboard import DashboardApp, serve_dashboard
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .publisher import LocalArtifactPublisher
-from .providers import HeuristicRepairProvider, OpenAIRepairProvider
-from .sandbox import DockerSandboxRunner, LocalSandboxRunner
+from .providers import GroqRepairProvider, HeuristicRepairProvider, OpenAIRepairProvider
+from .sandbox import E2BSandboxRunner, LocalSandboxRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,31 +22,24 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--max-attempts", type=int, default=3)
     common.add_argument(
         "--provider",
-        choices=("openai", "heuristic"),
+        choices=("openai", "groq", "heuristic"),
         default="openai",
-        help="Repair provider. OpenAI is the demo default; heuristic is fallback-only.",
+        help="Repair provider. OpenAI is the demo default; Groq is an alternate API path; heuristic is fallback-only.",
     )
     common.add_argument(
         "--sandbox",
-        choices=("docker", "local"),
-        default="docker",
-        help="Validation sandbox. Docker is the demo default.",
+        choices=("e2b", "local"),
+        default="e2b",
+        help="Validation sandbox. E2B is the demo default; local is fallback-only.",
     )
     common.add_argument(
         "--allow-heuristic-fallback",
         action="store_true",
-        help="Allow heuristic fallback if the OpenAI provider cannot produce a valid repair plan.",
+        help="Allow heuristic fallback if the selected provider cannot produce a valid repair plan.",
     )
-    common.add_argument(
-        "--openai",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    common.add_argument(
-        "--use-docker",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    common.add_argument("--openai-api-key", default=None, help="Override OPENAI_API_KEY for OpenAI runs.")
+    common.add_argument("--groq-api-key", default=None, help="Override GROQ_API_KEY for Groq runs.")
+    common.add_argument("--e2b-api-key", default=None, help="Override E2B_API_KEY for sandbox runs.")
 
     run_parser = subparsers.add_parser("run", parents=[common], help="Run one repair cycle.")
     run_parser.add_argument("--output-dir", default=".reflexa_artifacts")
@@ -59,10 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def create_orchestrator(args: argparse.Namespace) -> Orchestrator:
-    provider_name = "openai" if getattr(args, "openai", False) else args.provider
-    sandbox_name = "docker" if getattr(args, "use_docker", False) else args.sandbox
-    provider = OpenAIRepairProvider() if provider_name == "openai" else HeuristicRepairProvider()
-    sandbox = DockerSandboxRunner() if sandbox_name == "docker" else LocalSandboxRunner()
+    if args.provider == "openai":
+        provider = OpenAIRepairProvider(api_key=args.openai_api_key)
+    elif args.provider == "groq":
+        provider = GroqRepairProvider(api_key=args.groq_api_key)
+    else:
+        provider = HeuristicRepairProvider()
+    sandbox = E2BSandboxRunner(api_key=args.e2b_api_key) if args.sandbox == "e2b" else LocalSandboxRunner()
     publisher = LocalArtifactPublisher(Path(getattr(args, "output_dir", ".reflexa_artifacts")))
     return Orchestrator(
         provider=provider,

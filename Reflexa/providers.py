@@ -3,9 +3,10 @@
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 from urllib import request
 
 from .models import PatchEdit, PatchProposal
@@ -67,14 +68,8 @@ REPAIR_PLAN_SCHEMA = {
         "analysis": {"type": "string", "minLength": 1},
         "summary": {"type": "string", "minLength": 1},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "assumptions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-        },
-        "verification_notes": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-        },
+        "assumptions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "verification_notes": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "edits": {
             "type": "array",
             "minItems": 1,
@@ -93,80 +88,20 @@ REPAIR_PLAN_SCHEMA = {
 }
 
 
-@dataclass(slots=True)
-class OpenAIRepairProvider:
-    """OpenAI-backed repair provider with a strict JSON repair-plan contract."""
+class _RepairContractMixin:
+    provider_name: ClassVar[str] = "Provider"
+    api_key_env_var: ClassVar[str] = "API_KEY"
 
-    api_key: str | None = None
-    model: str = "gpt-5.6"
-    endpoint: str = "https://api.openai.com/v1/responses"
-    max_response_attempts: int = 2
+    api_key: str | None
+    model: str
+    endpoint: str
+    max_response_attempts: int
 
-    def propose_patch(self, context: RepairContext) -> PatchProposal:
-        api_key = self.api_key or os.getenv("OPENAI_API_KEY")
+    def _resolve_api_key(self) -> str:
+        api_key = self.api_key or os.getenv(self.api_key_env_var)
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for OpenAIRepairProvider.")
-
-        validation_errors: list[str] = []
-        previous_output = ""
-        last_error: Exception | None = None
-
-        for attempt in range(1, self.max_response_attempts + 1):
-            payload = self._build_payload(context, validation_errors=validation_errors if attempt > 1 else None, previous_output=previous_output if attempt > 1 else None)
-            body = self._post_payload(api_key, payload)
-            text = self._extract_text(body)
-            previous_output = text
-            try:
-                parsed = self._parse_repair_plan(text)
-                return PatchProposal(
-                    analysis=parsed["analysis"],
-                    summary=parsed["summary"],
-                    edits=[PatchEdit(**item) for item in parsed["edits"]],
-                    confidence=parsed.get("confidence"),
-                    assumptions=parsed.get("assumptions", []),
-                    verification_notes=parsed.get("verification_notes", []),
-                    raw_response=parsed,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                validation_errors = self._format_validation_errors(exc, text)
-
-        raise RuntimeError(f"OpenAI repair plan did not satisfy the contract after {self.max_response_attempts} attempt(s): {last_error}")
-
-    def _build_payload(self, context: RepairContext, validation_errors: list[str] | None = None, previous_output: str | None = None) -> dict[str, object]:
-        user_prompt = self._build_user_prompt(context, validation_errors=validation_errors, previous_output=previous_output)
-        payload: dict[str, object] = {
-            "model": self.model,
-            "temperature": 0.1,
-            "max_output_tokens": 1800,
-            "input": [
-                {"role": "system", "content": self._build_system_prompt()},
-                {"role": "user", "content": user_prompt},
-            ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "reflexa_repair_plan",
-                    "strict": True,
-                    "schema": REPAIR_PLAN_SCHEMA,
-                }
-            },
-        }
-        return payload
-
-    def _post_payload(self, api_key: str, payload: dict[str, object]) -> dict:
-        data = json.dumps(payload).encode("utf-8")
-        req = request.Request(
-            self.endpoint,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with request.urlopen(req, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raise RuntimeError(f"{self.api_key_env_var} is required for {self.__class__.__name__}.")
+        return api_key
 
     def _build_system_prompt(self) -> str:
         return (
@@ -179,7 +114,12 @@ class OpenAIRepairProvider:
             "If you cannot confidently repair the failure, still return the best concrete edit plan you can justify in the schema."
         )
 
-    def _build_user_prompt(self, context: RepairContext, validation_errors: list[str] | None = None, previous_output: str | None = None) -> str:
+    def _build_user_prompt(
+        self,
+        context: RepairContext,
+        validation_errors: list[str] | None = None,
+        previous_output: str | None = None,
+    ) -> str:
         files = "\n\n".join(f"FILE: {path}\n{content}" for path, content in context.relevant_files.items())
         prompt = [
             "Diagnose the failing test and produce a repair plan that satisfies the JSON schema.",
@@ -201,29 +141,23 @@ class OpenAIRepairProvider:
             "- Each edit note should explain the reason for that file change.",
         ]
         if validation_errors:
-            prompt.extend([
-                "",
-                "Your previous response did not satisfy the contract.",
-                "Fix these validation errors and return a corrected JSON object only:",
-                *[f"- {error}" for error in validation_errors],
-            ])
+            prompt.extend(
+                [
+                    "",
+                    "Your previous response did not satisfy the contract.",
+                    "Fix these validation errors and return a corrected JSON object only:",
+                    *[f"- {error}" for error in validation_errors],
+                ]
+            )
         if previous_output:
-            prompt.extend([
-                "",
-                "Previous output to correct:",
-                previous_output,
-            ])
+            prompt.extend(
+                [
+                    "",
+                    "Previous output to correct:",
+                    previous_output,
+                ]
+            )
         return "\n".join(prompt)
-
-    def _extract_text(self, response_body: dict) -> str:
-        if isinstance(response_body.get("output_text"), str) and response_body["output_text"].strip():
-            return response_body["output_text"]
-        for item in response_body.get("output", []):
-            for content in item.get("content", []):
-                text = content.get("text")
-                if text:
-                    return text
-        raise RuntimeError("OpenAI response did not contain any text output.")
 
     def _parse_repair_plan(self, text: str) -> dict:
         payload = self._load_json_like(text)
@@ -311,5 +245,222 @@ class OpenAIRepairProvider:
             edits.append({"path": normalized_path, "content": content, "note": note})
         return edits
 
-    def _format_validation_errors(self, error: Exception, text: str) -> list[str]:
-        return [str(error), f"Model output was: {text[:700]}"]
+    def _format_validation_errors(self, exc: Exception, text: str) -> list[str]:
+        errors = [str(exc)]
+        candidate = text.strip()
+        if candidate:
+            errors.append(f"Model returned {len(candidate)} characters of output.")
+        return errors
+
+    def _proposal_from_parsed(self, parsed: dict) -> PatchProposal:
+        return PatchProposal(
+            analysis=parsed["analysis"],
+            summary=parsed["summary"],
+            edits=[PatchEdit(**item) for item in parsed["edits"]],
+            confidence=parsed.get("confidence"),
+            assumptions=parsed.get("assumptions", []),
+            verification_notes=parsed.get("verification_notes", []),
+            raw_response=parsed,
+        )
+
+
+@dataclass(slots=True)
+class OpenAIRepairProvider(_RepairContractMixin):
+    """OpenAI-backed repair provider with a strict JSON repair-plan contract."""
+
+    provider_name: ClassVar[str] = "OpenAI"
+    api_key_env_var: ClassVar[str] = "OPENAI_API_KEY"
+
+    api_key: str | None = None
+    model: str = "gpt-5.6"
+    endpoint: str = "https://api.openai.com/v1/responses"
+    max_response_attempts: int = 2
+
+    def propose_patch(self, context: RepairContext) -> PatchProposal:
+        api_key = self._resolve_api_key()
+        validation_errors: list[str] = []
+        previous_output = ""
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_response_attempts + 1):
+            payload = self._build_payload(
+                context,
+                validation_errors=validation_errors if attempt > 1 else None,
+                previous_output=previous_output if attempt > 1 else None,
+            )
+            body = self._post_payload(api_key, payload)
+            text = self._extract_text(body)
+            previous_output = text
+            try:
+                parsed = self._parse_repair_plan(text)
+                return self._proposal_from_parsed(parsed)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                validation_errors = self._format_validation_errors(exc, text)
+
+        raise RuntimeError(
+            f"{self.provider_name} repair plan did not satisfy the contract after {self.max_response_attempts} attempt(s): {last_error}"
+        )
+
+    def _build_payload(
+        self,
+        context: RepairContext,
+        validation_errors: list[str] | None = None,
+        previous_output: str | None = None,
+    ) -> dict[str, object]:
+        user_prompt = self._build_user_prompt(context, validation_errors=validation_errors, previous_output=previous_output)
+        return {
+            "model": self.model,
+            "temperature": 0.1,
+            "max_output_tokens": 1800,
+            "input": [
+                {"role": "system", "content": self._build_system_prompt()},
+                {"role": "user", "content": user_prompt},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "reflexa_repair_plan",
+                    "strict": True,
+                    "schema": REPAIR_PLAN_SCHEMA,
+                }
+            },
+        }
+
+    def _post_payload(self, api_key: str, payload: dict[str, object]) -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.endpoint,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+            },
+            method="POST",
+        )
+
+        opener = request.build_opener(request.ProxyHandler({}))
+        with opener.open(req, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _extract_text(self, response_body: dict) -> str:
+        if isinstance(response_body.get("output_text"), str) and response_body["output_text"].strip():
+            return response_body["output_text"]
+        for item in response_body.get("output", []):
+            for content in item.get("content", []):
+                text = content.get("text")
+                if text:
+                    return text
+        raise RuntimeError(f"{self.provider_name} response did not contain any text output.")
+
+
+@dataclass(slots=True)
+class GroqRepairProvider(_RepairContractMixin):
+    """Groq-backed repair provider using Groq's Chat Completions API."""
+
+    provider_name: ClassVar[str] = "Groq"
+    api_key_env_var: ClassVar[str] = "GROQ_API_KEY"
+
+    api_key: str | None = None
+    model: str = "openai/gpt-oss-120b"
+    endpoint: str = "https://api.groq.com/openai/v1/chat/completions"
+    max_response_attempts: int = 2
+
+    def propose_patch(self, context: RepairContext) -> PatchProposal:
+        api_key = self._resolve_api_key()
+        validation_errors: list[str] = []
+        previous_output = ""
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_response_attempts + 1):
+            payload = self._build_payload(
+                context,
+                validation_errors=validation_errors if attempt > 1 else None,
+                previous_output=previous_output if attempt > 1 else None,
+            )
+            body = self._post_payload(api_key, payload)
+            text = self._extract_text(body)
+            previous_output = text
+            try:
+                parsed = self._parse_repair_plan(text)
+                return self._proposal_from_parsed(parsed)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                validation_errors = self._format_validation_errors(exc, text)
+
+        raise RuntimeError(
+            f"{self.provider_name} repair plan did not satisfy the contract after {self.max_response_attempts} attempt(s): {last_error}"
+        )
+
+    def _build_payload(
+        self,
+        context: RepairContext,
+        validation_errors: list[str] | None = None,
+        previous_output: str | None = None,
+    ) -> dict[str, object]:
+        user_prompt = self._build_user_prompt(context, validation_errors=validation_errors, previous_output=previous_output)
+        return {
+            "model": self.model,
+            "temperature": 0.1,
+            "max_tokens": 1800,
+            "messages": [
+                {"role": "system", "content": self._build_system_prompt()},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "reflexa_repair_plan",
+                    "strict": True,
+                    "schema": REPAIR_PLAN_SCHEMA,
+                },
+            },
+        }
+
+    def _post_payload(self, api_key: str, payload: dict[str, object]) -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.endpoint,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+            },
+            method="POST",
+        )
+
+        opener = request.build_opener(request.ProxyHandler({}))
+        with opener.open(req, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _extract_text(self, response_body: dict) -> str:
+        choices = response_body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(f"{self.provider_name} response did not contain any choices.")
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                parts = [part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)]
+                text = "".join(parts).strip()
+                if text:
+                    return text
+        raise RuntimeError(f"{self.provider_name} response did not contain any message content.")
+
+
+
+
+
+
+
+
+
+

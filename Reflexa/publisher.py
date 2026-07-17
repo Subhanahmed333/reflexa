@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib import request
 
-from .models import PublicationResult, PatchEdit
+from .models import PatchEdit, PublicationResult
 
 
 def _read_text(path: Path) -> str:
@@ -36,17 +36,26 @@ def build_patch_text(original_root: Path, working_root: Path, edits: Iterable[Pa
     return '\n'.join(chunks) + ('\n' if chunks else '')
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> str:
-    completed = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=False)
+def _git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault('GIT_AUTHOR_NAME', 'Reflexa')
+    env.setdefault('GIT_AUTHOR_EMAIL', 'reflexa@example.com')
+    env.setdefault('GIT_COMMITTER_NAME', env['GIT_AUTHOR_NAME'])
+    env.setdefault('GIT_COMMITTER_EMAIL', env['GIT_AUTHOR_EMAIL'])
+    return env
+
+
+def _run_git(args: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
+    completed = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=False, env=env)
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or 'git command failed')
     return completed.stdout.strip()
 
 
 def _discover_github_repository(cwd: Path) -> str | None:
-    env_repository = os.getenv('GITHUB_REPOSITORY')
-    if env_repository:
-        return env_repository
+    for value in (os.getenv('GITHUB_REPOSITORY'), os.getenv('GITHUB_REPO')):
+        if value:
+            return value
     try:
         remote_url = _run_git(['remote', 'get-url', 'origin'], cwd=cwd)
     except Exception:
@@ -57,19 +66,26 @@ def _discover_github_repository(cwd: Path) -> str | None:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
-def _discover_head_branch(cwd: Path) -> str | None:
-    for value in (os.getenv('GITHUB_HEAD_REF'), os.getenv('GITHUB_REF_NAME')):
-        if value:
-            return value
-    try:
-        branch = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=cwd)
-    except Exception:
-        return None
-    return branch if branch and branch != 'HEAD' else None
-
-
 def _discover_base_branch(cwd: Path) -> str:
     return os.getenv('GITHUB_BASE_REF') or os.getenv('REFLEXA_GITHUB_BASE_BRANCH') or 'main'
+
+
+def _authenticated_remote_url(repository: str, token: str) -> str:
+    return f'https://x-access-token:{token}@github.com/{repository}.git'
+
+
+def _push_github_branch(workspace_root: Path, run_id: str, token: str, repository: str, commit_message: str) -> str:
+    branch = f'reflexa/{run_id}'
+    env = _git_env()
+    _run_git(['checkout', '-b', branch], cwd=workspace_root, env=env)
+    _run_git(['add', '-A'], cwd=workspace_root, env=env)
+    staged = _run_git(['diff', '--cached', '--name-only'], cwd=workspace_root, env=env)
+    if not staged:
+        raise RuntimeError('No changes were staged for commit.')
+    _run_git(['commit', '-m', commit_message], cwd=workspace_root, env=env)
+    remote_url = _authenticated_remote_url(repository, token)
+    _run_git(['push', '--set-upstream', remote_url, branch], cwd=workspace_root, env=env)
+    return branch
 
 
 @dataclass(slots=True)
@@ -99,7 +115,7 @@ class GitHubPRPublisher:
 
     def publish(self, title: str, summary: str, head: str, base: str = 'main') -> PublicationResult:
         token = self.token or os.getenv('GITHUB_TOKEN')
-        repository = self.repository or os.getenv('GITHUB_REPOSITORY')
+        repository = self.repository or os.getenv('GITHUB_REPOSITORY') or os.getenv('GITHUB_REPO')
         if not token or not repository:
             raise RuntimeError('GITHUB_TOKEN and GITHUB_REPOSITORY are required for GitHub PR publishing.')
 
@@ -132,16 +148,15 @@ class GitHubPRPublisher:
 
 def publish_output(run_id: str, title: str, summary: str, patch_text: str, artifact_dir: Path | None = None, workspace_root: Path | None = None) -> PublicationResult:
     workspace_root = workspace_root or (artifact_dir.parent if artifact_dir else Path.cwd())
-    head = _discover_head_branch(workspace_root)
     token = os.getenv('GITHUB_TOKEN')
     repository = _discover_github_repository(workspace_root)
     base = _discover_base_branch(workspace_root)
 
-    if token and repository and head:
+    if token and repository:
         try:
+            head = _push_github_branch(workspace_root, run_id, token, repository, title)
             return GitHubPRPublisher(token=token, repository=repository).publish(title=title, summary=summary, head=head, base=base)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f'GitHub PR publish failed: {exc}')
 
     return LocalArtifactPublisher(output_dir=artifact_dir or Path('.reflexa_artifacts')).publish(run_id, title, summary, patch_text)
-

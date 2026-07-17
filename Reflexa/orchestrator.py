@@ -139,7 +139,6 @@ class Orchestrator:
                 summary=last_summary,
                 patch_text=patch_text,
                 artifact_dir=self.publisher.output_dir,
-                workspace_root=config.repo_path,
             )
             self._emit(
                 sink,
@@ -181,7 +180,7 @@ class Orchestrator:
                     events,
                     run_id,
                     'provider_error',
-                    'OpenAI repair provider failed.',
+                    'Repair provider failed.',
                     {'error': str(exc), 'fallback_enabled': self.allow_heuristic_fallback},
                 )
                 raise
@@ -190,7 +189,7 @@ class Orchestrator:
                 events,
                 run_id,
                 'provider_fallback',
-                'OpenAI repair provider failed; using heuristic fallback.',
+                'Repair provider failed; using heuristic fallback.',
                 {'error': str(exc)},
             )
             return HeuristicRepairProvider().propose_patch(context)
@@ -245,5 +244,10 @@ class Orchestrator:
                 if original != updated:
                     edits.append(PatchEdit(path=rel_path, content=updated))
         return edits
+
+
+
+
+
 
 
