@@ -1,0 +1,29 @@
+--- E:\Reflexa\tests\fixtures\demo_repo\app\math_utils.py
++++ C:\Users\Subha\AppData\Local\Temp\reflexa-work-bg8mhmsc\workspace\app\math_utils.py
+@@ -1,6 +1,25 @@
++"""Utility math functions for the demo app.
++
++This module provides simple mathematical helpers used throughout the
++application. Currently it includes an inclusive sum function that
++returns the sum of all integers from 1 up to and including the given
++limit.
++"""
++
+ from __future__ import annotations
+ 
+ 
+ def inclusive_sum(limit: int) -> int:
+-    return sum(range(limit))
++    """Return the sum of all integers from 1 to *limit* inclusive.
+ 
++    Args:
++        limit: The upper bound of the range to sum. Must be a non‑negative
++            integer. If ``limit`` is 0, the function returns 0.
++
++    Returns:
++        The inclusive sum as an integer.
++    """
++    if limit <= 0:
++        return 0
++    # Sum of 1..limit can be computed directly or via range.
++    return sum(range(1, limit + 1))
